@@ -20,8 +20,8 @@ require 'json'
 #
 # Statsd instances are thread safe for general usage, by utilizing the thread
 # safe nature of UDP sends. The attributes are stateful, and are not
-# mutexed, it is expected that users will not change these at runtime in
-# threaded environments. If users require such use cases, it is recommend that
+# mutexed, and it is expected that users will not change them at runtime in
+# threaded environments. If users require such use cases, it is recommended that
 # users either mutex around their Statsd object, or create separate objects for
 # each namespace / host+port combination.
 class Statsd
@@ -37,7 +37,7 @@ class Statsd
   #   batch.flush
   #
   # Batch is a subclass of Statsd, but with a constructor that proxies to a
-  # normal Statsd instance. It has it's own batch_size and namespace parameters
+  # normal Statsd instance. It has its own batch_size and namespace parameters
   # (that inherit defaults from the supplied Statsd instance). It is recommended
   # that some care is taken if setting very large batch sizes. If the batch size
   # exceeds the allowed packet size for UDP on your network, communication
@@ -53,13 +53,14 @@ class Statsd
       :postfix,
       :delimiter, :delimiter=
 
-    attr_accessor :batch_size, :batch_byte_size
+    attr_accessor :batch_size, :batch_byte_size, :batch_sample_rate
 
     # @param [Statsd] requires a configured Statsd instance
     def initialize(statsd)
       @statsd = statsd
       @batch_size = statsd.batch_size
       @batch_byte_size = statsd.batch_byte_size
+      @batch_sample_rate = 1
       @backlog = []
       @backlog_bytesize = 0
     end
@@ -69,8 +70,23 @@ class Statsd
     # A convenience method to ensure that data is not lost in the event of an
     # exception being thrown. Batches will be transmitted on the parent socket
     # as soon as the batch is full, and when the block finishes.
-    def easy
-      yield self
+    #
+    # If a sample_rate is passed, then with that probability it yields itself
+    # with its batch_sample_rate modified for that same probability,
+    # or else it ends the yield chain (does nothing).
+    def easy(sample_rate=1)
+      puts "easy called with sample_rate #{sample_rate}, rand: " + rand.to_s + " " + rand.to_s + " " + rand.to_s
+      if sample_rate == 1
+        yield self
+      elsif rand < sample_rate
+        old_batch_sample_rate = @batch_sample_rate
+	begin
+          @batch_sample_rate *= sample_rate
+	  yield self
+	ensure
+	  @batch_sample_rate = old_batch_sample_rate
+	end
+      end
     ensure
       flush
     end
@@ -101,6 +117,12 @@ class Statsd
           (@batch_byte_size && @backlog_bytesize == @batch_byte_size)
         flush
       end
+    end
+
+    private
+
+    def send_stats(stat, delta, type, sample_rate=1, send_sample_rate=1)
+      super(stat, delta, type, sample_rate*@batch_sample_rate, send_sample_rate*@batch_sample_rate)
     end
 
   end
@@ -425,8 +447,8 @@ class Statsd
   #     batch.increment 'sys.requests'
   #     batch.gauge('user.count', User.count)
   #   end
-  def batch(&block)
-    Batch.new(self).easy(&block)
+  def batch(sample_rate=1, &block)
+    Batch.new(self).easy(sample_rate, &block)
   end
 
   # Reconnects the socket, useful if the address of the statsd has changed. This
@@ -480,8 +502,9 @@ class Statsd
 
   private
 
-  def send_stats(stat, delta, type, sample_rate=1, send_sample_rate=sample_rate)
+  def send_stats(stat, delta, type, sample_rate=1, send_sample_rate=nil)
     if sample_rate == 1 or rand < sample_rate
+      send_sample_rate ||= sample_rate
       # Replace Ruby module scoping with '.' and reserved chars (: | @) with underscores.
       stat = stat.to_s.gsub('::', delimiter).tr(':|@', '_')
       rate = "|@#{send_sample_rate}" unless send_sample_rate == 1

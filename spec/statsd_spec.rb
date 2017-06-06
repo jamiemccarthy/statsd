@@ -451,6 +451,34 @@ describe Statsd do
 
   end
 
+  describe "batching with sample rate" do
+    it "should have a default batch sample rate of 1" do
+      batch = Statsd::Batch.new(@statsd)
+      batch.batch_sample_rate.must_equal 1
+    end
+
+    it "should have a modifiable batch sample rate" do
+      batch = Statsd::Batch.new(@statsd)
+      batch.batch_sample_rate = 0.5
+      batch.batch_sample_rate.must_equal 0.5
+    end
+
+    it "should batch via easy by default with batch sample rate of 1" do
+      @statsd.batch do |batch|
+        batch.batch_sample_rate.must_equal 1
+      end
+    end
+
+    describe "with a modified sample rate" do
+      before { class << @statsd; def rand; 0.1; end; end } # ensure block invocation
+      it "should batch via easy" do
+        @statsd.batch(0.11) do |batch|
+          batch.batch_sample_rate.must_equal 1
+        end
+      end
+    end
+  end
+
   describe "#connect" do
     it "should reconnect" do
       c = $connect_count
